@@ -29,7 +29,7 @@ library(here)
 spp <- c("Dracaena reflexa")
 
 # download GBIF occurrence data for this species; this takes time if there are many data points!
-gbif_download <- occ_data(scientificName = spp, hasCoordinate = TRUE, country = 'MG')
+gbif_download <- occ_data(scientificName = spp, hasCoordinate = TRUE, country = 'MG', limit = 10000)
 
 # select only the data (ignore the other metadata for now)
 gbif_data <- gbif_download$data
