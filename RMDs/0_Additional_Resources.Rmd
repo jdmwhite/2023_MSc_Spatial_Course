@@ -1,0 +1,48 @@
+---
+title: "Additional Resources"
+author: 
+  name: Joseph White^[j.white2@kew.org], Nicola Kühn^[n.kuhn@kew.org], Carolina Tovar^[c.tovar@kew.org]
+  affiliation: Spatial Analysis Team, Ecosystem Stewardship, RGB Kew
+date: "2023-11-27"
+output: 
+  html_document:
+    # toc: true
+    # toc_float: true
+    # toc_depth: 4
+    # theme: yeti
+    # highlight: haddock
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("html")) })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### R Markdown Guidance
+- [RMarkdown Cheatsheet](https://www.rstudio.com/blog/the-r-markdown-cheat-sheet/)
+
+#### More background on the data we are using
+- [GBIF website](gbif.org)
+- [GBIF commentary paper](https://doi.org/10.7717/peerj.9916)
+- [WorldClim website](worldclim.org)
+- [WorldClim commentary paper](https://doi.org/10.1002/joc.5086)
+
+#### More background on the SDM packages we used
+- flexsdm: [paper](https://doi.org/10.1111/2041-210X.13874) & [website](https://sjevelazco.github.io/flexsdm/)
+- SDMtune: [paper](https://onlinelibrary.wiley.com/doi/full/10.1002/ece3.6786) & [website](https://consbiol-unibern.github.io/SDMtune/)
+
+#### Useful SDM papers
+- [Elith & Leathwick 2009](https://www.annualreviews.org/doi/abs/10.1146/annurev.ecolsys.110308.120159?casa_token=ZCcYcz4kym4AAAAA:PPSNWmUn0wy2Ieu6nVwpzX37f-67fnkVMMxfAUk74Peu01XafOnSf-SF0VuCL24WMwDu4koUzR2wFyg) 
+- [Valavi et al. 2021](https://doi.org/10.1002/ecm.1486)
+- [Dubos et al. 2022](https://doi.org/10.1111/acv.12775)
+
+#### Machine Learning tips
+- [How does a Random Forest work?](https://www.turing.com/kb/random-forest-algorithm)
+- [Konowalik & Nosol 2021](https://www.nature.com/articles/s41598-020-80062-1)
+- [Metrics to evaluate your ML algorithm](https://towardsdatascience.com/metrics-to-evaluate-your-machine-learning-algorithm-f10ba6e38234)
+- [True Skill Statistics](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5288248/pdf/ECE3-7-863.pdf)
+- [AUC and Receiver Operature Curve](https://towardsdatascience.com/roc-curve-and-auc-explained-8ff3438b3154)
+
+
+ 

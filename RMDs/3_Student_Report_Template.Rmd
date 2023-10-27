@@ -1,0 +1,141 @@
+---
+title: "Student Report Template" #EDIT TITLE HERE
+author: Student Name #EDIT NAME HERE
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+bibliography: "`r here::here('references.bib')`"
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("html")) })
+---
+
+# Assignment Notes:
+
+The assignment for this report is to...
+
+Note: you can delete the above text regarding the assignment once you are comfortable you have all of the required information.
+
+Citations example:
+
+Example citation 1 [@SDMtune]
+
+Example citation 2 [@flexSDM]
+
+Note: add your citations to the references.bib file, in the same format provided with the example.
+
+Image example:
+
+Place your chosen images in the images folder. Then copy and paste this code chunk and change the file name to your image name.
+
+```{r example image, echo=FALSE, out.width='100%', fig.cap='Figure 1. The expected workflow and end product of session 2.'}
+knitr::include_graphics(here::here('images/2_species_distribution_model.png'))
+```
+
+# Summary/Abstract
+
+- Add in abstract here.
+
+# Introduction
+
+- Background on Madagascar
+- Background on species
+- Motivation for SDMs
+
+# Methods
+
+- Describe and motivate your choice of methods
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+```{r, warning=F, message = F}
+#### from practical 1
+library(rgbif)
+library(DT)
+library(tidyverse)
+library(CoordinateCleaner)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(mapview)
+library(terra)
+library(flexsdm)
+library(here)
+
+# new libraries from practical 2
+library(corrplot)
+library(virtualspecies)
+library(SDMtune)
+```
+
+### 1. Download locality data from GBIF
+
+```{r}
+
+```
+
+### 2. Clean GBIF data
+
+```{r}
+
+```
+
+### 3. Spatial thinning
+
+```{r}
+
+```
+
+### 4. Create pseudo-absences
+
+```{r}
+
+```
+
+### 5. Process environmental data
+
+```{r}
+
+```
+
+### 6. Prepare extracted data
+
+```{r}
+
+```
+
+# Results
+
+- Describe your results
+
+### 7. Run & evaluate model
+
+```{r}
+
+```
+
+### 8. Variable insights & predicting habitat suitability
+
+```{r}
+
+```
+
+# Discussion
+
+- Prompts
+
+Q: does your species have enough locality data to accurately predict your species distribution?
+
+Q: how do we know if the model is accurately predicting the distribution of your species?
+
+Q: which bioclimatic variables, which were filtered out earlier due to their high colinearity, might also be important in determining your species distribution?
+
+Q: discuss the major environmental drivers of your species distribution, focus on the direction and magnitude of their influence and discuss this relative to other information you can find regarding your species? (e.g. tree in spiny dry forest grows in arid, strongly seasonal environment)
+
+Q: Name and describe two ways we could make the modeling results more robust. 
+
+# References

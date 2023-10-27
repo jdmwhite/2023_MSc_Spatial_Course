@@ -1,0 +1,799 @@
+---
+title: "Species distribution model"
+author: 
+  name: Joseph White^[j.white2@kew.org], Tarciso Leao^[t.leao@kew.org], Felix Lim^[F.Lim@kew.org], Carolina Tovar^[c.tovar@kew.org]
+  affiliation: Spatial Analysis Team, Ecosystem Stewardship, RGB Kew
+date: "2023-11-30"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    # theme: yeti
+    # highlight: haddock
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("html")) })
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+```{r klippy, echo=FALSE, include=TRUE}
+# install.packages('remotes')
+# remotes::install_github("rlesur/klippy")
+klippy::klippy(position = c('top','right'))
+```
+
+Species Distribution models (SDMs, also called habitat suitability
+models or ecological niche models, depending on the goal) involves the
+identification of areas of likely species occurrence by learning a
+relationship between known occurrences and environmental variables
+(covariates). The 'learning' component of species-environment
+relationships can be accomplished by common machine learning algorithms,
+such as random forest or Maximum Entropy (MaxEnt). For this short
+course, the inner-workings of these algorithms are beyond the scope of
+our available time. There are many papers describing SDMs, but if you
+are new to the field, these papers by [Elith & Leathwick
+2009](https://www.annualreviews.org/doi/abs/10.1146/annurev.ecolsys.110308.120159?casa_token=ZCcYcz4kym4AAAAA:PPSNWmUn0wy2Ieu6nVwpzX37f-67fnkVMMxfAUk74Peu01XafOnSf-SF0VuCL24WMwDu4koUzR2wFyg)
+and [Valavi et al. 2021](https://doi.org/10.1002/ecm.1486) are a useful
+place to start.
+
+SDMs are used for a range of purposes, including understanding drivers
+of species distributions, conservation planning and risk forecasting.
+This tutorial is likely to be challenging for a beginner in spatial
+analysis, but is designed to try to balance thoroughness with
+simplicity.
+
+Our overall goal is to produce a prediction map of the most suitable
+habitat for a species of interest and to better understand the
+environmental drivers behind its current distribution. Along the way, we
+will carefully process our data to make sure we have the best inputs and
+then provide a model evaluation procedure to determine how robust our
+findings are.
+
+### Learning objectives
+
+5.  Process environmental data
+6.  Prepare extracted data
+7.  Run & evaluate model
+8.  Variable insights & predicting habitat suitability
+BONUS SECTION
+
+IMPORTANT NOTES:
+
+-   [Code chunks shown in GREEN]{style="color: green;"}: you must change
+    this to your species of choice. Find your species on QM+.
+-   [Code chunks shown in BLUE]{style="color: blue;"}: these are bits of
+    code that require some important choices. You need to use your
+    discretion and best practices here to find the best solution for
+    your species. So change the values around and see how it changes the
+    outputs. Add this to your end discussion.
+
+```{r workflow, echo=FALSE, out.width='100%', fig.cap='Figure 1. The expected workflow and end product of session 2.'}
+knitr::include_graphics(here::here('images/2_species_distribution_model.png'))
+```
+
+#### Install and load packages
+
+```{r packages, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(flexsdm)
+library(corrplot)
+library(sf)
+library(terra)
+library(here)
+library(SDMtune)
+library(virtualspecies)
+library(exactextractr)
+```
+
+### 5. Process environmental data
+
+```{r workflow 5, echo=FALSE, out.width='100%', fig.cap='Step 5.'}
+knitr::include_graphics(here::here('images/2_species_distribution_model_1.png'))
+```
+
+In this session, we will use both raster and vector data. Unfortunately,
+there is no consensus on which libraries to use for these date types,
+and even where there is, old packages may not have updated to the new
+libraries yet. Because of this, we will be jumping between packages for
+handling rasters (`raster` and `terra` libraries) and vectors (`sf` and
+`terra`). We start by loading in our vector data (points and country
+boundary) by using `terra::vect()`:
+
+#### Load in data
+
+```{r choose species, class.source="bg-success"}
+# Name your species
+spp <- c("Dracaena reflexa")
+spp_code <- gsub(' ', '_', spp)
+```
+
+```{r}
+#### Load in data ----
+# Read species data 
+all_pts <- vect(here(paste0('output/species_localities/',spp_code, '_all_points.shp')))
+
+# using the rnaturalearth package, download the country border and return it as an sf object
+mad_sf <- ne_countries(country = 'Madagascar', scale = 'medium', returnclass = 'sf')
+mad <- vect(mad_sf)
+```
+
+#### Calibration area
+
+It is really important to only predict our habitat suitability to a
+region where the species could feasibly occur. In this practical, we are
+looking at species within Madagascar, which is a distinct geographical
+and biogeographical region. This makes our life a lot easier. However,
+in some cases, you may be working with species that don't comfortably
+fit into a "modeling box". In this case, we may want to define a
+calibration area (or area of interest) where our species could feasibly
+occur. We do not want to select an area too big (predicting outside of
+our species possible range) or an area too small (not predicting across
+its full range or leaving out useful locality data). Take a look at the
+function `flexsdm::calib_area()` on help to produce a useful calibration
+area.
+
+#### Clean environmental data
+
+Load in our environmental variables (WorldClim), changing the names,
+cropping and masking the dataset to Madagascar's boundaries. Lastly, we
+re-scale the temperature variables. For ease of storage, the values are
+stored as whole numbers (i.e. no decimal places) by multiplying them by
+10. So we need to divide them all by 10 to get the real values.
+
+```{r}
+# load worldclim data
+worldclim <- rast(here("data/rast/afr_worldclim.tif"))
+
+names(worldclim) <- c("mean_ann_t","mean_diurnal_t_range","isothermality", "t_seas", 'max_t_warm_m','min_t_cold_m',"t_ann_range",'mean_t_wet_q','mean_t_dry_q','mean_t_warm_q','mean_t_cold_q','ann_p', 'p_wet_m','p_dry_m','p_seas','p_wet_q','p_dry_q','p_warm_q','p_cold_q')
+
+# Ensure that the worldclim data and Madagascar boundary are in the same project
+mad <- project(mad, 'EPSG:4326')
+
+wc_mad <- worldclim %>% 
+  crop(., mad) %>% 
+  mask(., mad)
+
+# Re-scale temperature values
+wc_mad[[c(1:2,5:11)]] <- wc_mad[[c(1:2,5:11)]]/10
+wc_mad[[3:4]] <- wc_mad[[3:4]]/100
+```
+
+Let's plot all of our data together now (1 raster layer, Madagascar
+boundary and all points):
+
+```{r, fig.align='center', out.width='100%'}
+#### Visualise raw data ----
+plot(wc_mad$mean_ann_t)
+plot(mad, add = T)
+plot(all_pts, add=T)
+```
+
+Check and fix the projections.
+
+```{r}
+#### Check projections ----
+crs(wc_mad) == crs(mad)
+crs(wc_mad) == crs(all_pts)
+crs(mad) == crs(all_pts)
+mad <- project(mad, wc_mad)
+crs(wc_mad) == crs(mad)
+```
+
+#### Check for collinearity
+
+We now need to process our environmental variables a bit more
+thoroughly. To do this, we use a simple pearson correlation and aim to
+identify a reasonable threshold (usually 70% or 0.7). This threshold is
+a judgement to decide whether different variables/layers may be
+providing redundant (i.e. very similar) information to one another. For
+example, precipitation in the driest quarter & precipitation in the
+driest month tend to provide the same information. We want to do our
+best to remove this redundancy. What's important to keep in mind, is
+that even though we may only use one of these correlated layer/s in our
+model and remove the others, if the layer we kept in our model is
+important for the predicting our species distribution, it is likely our
+removed layer/s will be important too!
+
+First, we make a correlation plot, to identify our correlations:
+
+```{r, class.source="bg-info", out.width='100%'}
+# Using Pearson correlation
+cov_colin <- correct_colinvar(wc_mad, method = c('pearson', th = "0.7"))
+# Take a look at the correlations using corrplot
+corrplot(cov_colin$cor_table, type = 'lower', diag = FALSE, order = 'hclust', tl.cex = 0.6, tl.col = 'black')
+```
+
+Next, we use a recursive approach using hierarchical classification of
+groups of similar variables. Variables will be placed in groups with
+other variables most similar to them. In some cases, this may mean that
+variables with marginal correlation (e.g. just over 0.7), may be placed
+in with variables with greater correlations (e.g. \>0.8). For this
+reason, we will keep running the function until we no longer have any
+correlations in our dataset.
+
+```{r, out.width='100%'}
+# remove collinearity
+set.seed(42)
+non_colin <- removeCollinearity(raster::stack(wc_mad), 0.7, method = 'pearson', plot = TRUE, select.variables = TRUE, sample.points = FALSE)
+non_colin
+```
+
+These variables are the ones that have no other clear correlations with
+them, based on the first round of clustering. Let's run it again to see
+if found everything:
+
+```{r, out.width='100%'}
+wc_mad_sel <- wc_mad[[non_colin]]
+set.seed(42)
+non_colin_check <- removeCollinearity(raster::stack(wc_mad_sel), 0.7, method = 'pearson', plot = TRUE, select.variables = TRUE, sample.points = FALSE)
+```
+
+There are still some variables showing a correlations, so run this once
+more.
+
+```{r, out.width='100%'}
+wc_mad_sel <- wc_mad_sel[[non_colin_check]]
+set.seed(42)
+non_colin_check_2 <- removeCollinearity(raster::stack(wc_mad_sel), 0.7, method = 'pearson', plot = TRUE, select.variables = TRUE, sample.points = FALSE)
+```
+
+We now have a set of `r nlyr(wc_mad_sel)` variables that we will use for
+our model.
+
+### 6. Prepare extracted data
+
+```{r workflow 6, echo=FALSE, out.width='100%', fig.cap='Step 6.'}
+knitr::include_graphics(here::here('images/2_species_distribution_model_2.png'))
+```
+
+#### Extract data
+
+The next steps are important to complete our final dataframe for the
+modeling process. Essentially the dataframe format is the same structure
+as what you typically need for most models. For each locality (both
+presences and pseudoabsences), we need to provide whether the species in
+present/absent and all of its associated environmental. We then run our
+model in the following format:
+
+$$
+response \sim predictor/s
+$$
+
+In our case, the equation will take the following broad structure:
+
+$$
+presence \sim worldclim1 + worldclim2 + worldclim2 + ... 
+$$ There are many ways to build this dataset. For example, we could go
+the route of using the `terra::extract()` function, which will produce
+our desired dataframe structure in a generic format, which most models
+will accept. In our case, we will use a function that is designed
+specifically for the `SDMtune` package: `prepareSWD()`. This function
+will run the extraction function under the hood, so we need to provide
+it with our presence & absence datasets and our environmental
+predictors:
+
+```{r}
+# Prepare a SWD (Sample with Data), which is a class of data specifically used in the SDMtune package
+all_pts_df <- as.data.frame(all_pts, geom = 'XY')
+
+SWDdata <- prepareSWD(
+  species = 'Aristida rufescens',
+  p = all_pts_df %>% filter(pr_ab == 1) %>% dplyr::select(x, y),
+  a = all_pts_df %>% filter(pr_ab == 0) %>% dplyr::select(x, y),
+  env = wc_mad_sel
+)
+
+# Inspect 10 random rows
+sample_n(cbind(SWDdata@pa, SWDdata@data), 10)
+```
+
+#### Train/test split
+
+Unlike most frequentist statistics, we will not have an output with
+p-values to suggest whether our model performed well or not. To properly
+evaluate our model, we need to test our model predictions against data
+that it has *not seen*. In most cases, we do not have an alternative
+dataset to do this with. So instead, we will take a small portion of our
+data (called the *test data*) and leave it out of our model development.
+The data we keep to run the model with is called the *training data*.
+Typically, the split between training and test data is around 70% vs.
+30%. In our case, we do not have a huge amount of data, so we want to
+keep as much as we can to *train* or *teach* the model enough about our
+data to make decent predictions. So we will split our data into 80%
+training and 20% testing data. This is the *learning* process in machine
+learning.
+
+We also use what's called a *seed* here. The train/test split is a
+random process. However, if we want the results to look the same on any
+machine that runs this random process, we can provide it with a set
+collection of random numbers. The seed can be any number, but as long as
+it's the same number on everyone's machines, it will produce the same
+output.
+
+```{r, class.source="bg-info"}
+# Split locations in training (80%) and testing (20%) datasets
+split_data <- trainValTest(SWDdata, test = 0.2, seed = 42)
+train <- split_data[[1]]
+test <- split_data[[2]]
+```
+
+Now that our data is extracted and we have split it into our training
+vs. testing data, we are ready to run almost any model type. In this
+case, we will use random forest, a commonly used machine learning
+algorithm.
+
+### 7. Run & evaluate model
+
+```{r workflow 7, echo=FALSE, out.width='100%', fig.cap='Step 7.'}
+knitr::include_graphics(here::here('images/2_species_distribution_model_3.png'))
+```
+
+#### Run a random forest model
+
+It is very simple to run our model using the `SDMtune` package. We
+simply called `train()` and specify the method/s we want to use (this is
+the model) and our training data. Here we use `method = c('RF')` to use
+a random forest model, but there are many other possible options to use
+(run `?SDMtune::train()` in your console to see the other options
+available in the `SDMtune` package). Read up
+[here](https://www.turing.com/kb/random-forest-algorithm) on the
+advantages of random forests. There are several parameters we could
+change for the random forest model, but we will use the default
+settings. The output of our model is a % estimate of the likelihood of
+each pixel in our calibration area being a presence. This percentage is
+calculated by counting the number of different *decision trees* that
+decided a pixel was either a presence or an absence. If 73 trees of the
+100 trees consider the pixel a presence, then the output will suggest
+73% chance of presence.
+
+```{r}
+set.seed(42)
+rf_model <- train(method = c('RF'), data = train)
+rf_model
+```
+
+Here is the predicted output for all of the *training* data we used to
+train the model, using both a probability, a majority-rule (0.5) threshold and two variable thresholds (0.4 and 0.6) output:
+
+```{r, out.width='100%'}
+cbind(train@pa, predict(rf_model, data = train)) %>% 
+  as.data.frame() %>% 
+  rename(true_class = V1, predicted_class = V2) %>% 
+  mutate(threshold_0.4 = ifelse(predicted_class >= 0.5, 1, 0),
+         threshold_0.5 = ifelse(predicted_class >= 0.5, 1, 0),
+         threshold_0.6 = ifelse(predicted_class >= 0.6, 1, 0)) %>%
+  DT::datatable()
+```
+
+#### Evaluate model
+
+Our model is now trained. Before we look at any exciting outputs, it is
+crucial to evaluate the performance of our model using the *test* data
+we kept behind earlier. There are dozens of available *metrics* to
+evaluate model performance. All of these are based on different
+interpretations of a confusion matrix, which is simpler than it sounds.
+A confusion matrix determines how many times our testing data accurately is classified a present (1) or absent (0). These give us our *true positives* or *true negatives*. (i.e. if our model predicts an absence and our testing data confirms this, it is a true negative).
+
+However, in some cases, our model might predict an absence, but our
+testing data says there is a presence there. This would be a *false
+negative*. The last category is if our model predicts a presence, but
+our training data says that site is an absence, this would be a *false
+positive*. These 4 categories are then used to make a simple table, as
+shown below:
+
+```{r fig.cap='Classic confusion matrix layout', out.width='100%', echo = F}
+knitr::include_graphics(here('images/Confusion_Matrix.png'))
+```
+
+Read up more on confusion matrices
+[here](https://towardsdatascience.com/confusion-matrix-for-your-multi-class-machine-learning-model-ff9aa3bf7826).
+
+Let's say we set a threshold where any prediction over 50% is a
+presence. Let's see what our confusion matrix is for our test data:
+
+```{r}
+cm <- confMatrix(rf_model, test = test, th = 0.5)
+cm_format <- as.data.frame(rbind(c('Positive',cm[,2],cm[,3]), c('Negative',cm[,4],cm[,5])))
+names(cm_format) <- c('Predicted classes','Positive', 'Negative')
+# rownames(cm_format) <- c('Positive', 'Negative')
+
+sketch = htmltools::withTags(table(
+  class = 'display',
+  thead(
+    tr(
+      th(rowspan = 2, 'Predicted classes'),
+      th(colspan = 2, 'Actual classes'),
+    ),
+    tr(
+      lapply(rep(c('Positive', 'Negative'), 1), th)
+    )
+  )
+))
+
+
+DT::datatable(cm_format, container = sketch, rownames = F)
+```
+
+Our results here suggest that there are `r cm$tp` true positives and
+`r cm$tn` true negatives. However, we have incorrectly classified a few
+points. There are `r cm$fp` false positives and `r cm$fn`.
+
+The first, very simple evaluation metric we can use is *accuracy*. This
+simply calculates the number of observations correctly classified (true)
+over all of the observations:
+
+$$
+Accuracy = ((True Positive + True Negative) / Total Observations) * 100
+$$
+
+In our case our formula is:
+
+$$
+Accuracy = ((`r cm$tp` + `r cm$tn`) / `r sum(cm$tp, cm$tp, cm$fp, cm$fn)` ) * 100
+$$ 
+
+$$
+Accuracy = `r round((cm$tp + cm$tn)/sum(cm$tp, cm$tp, cm$fp, cm$fn)*100, 2)` %
+$$
+
+Accuracy is just one very simple measure of how well a model performs
+and many would argue not reliable. Values above 70% may be doing a
+decent to very good job. Anything below 50% is performing worse than
+chance and is a poor performing model.
+
+There are a few other metrics we could use, such as the True Skill
+Statistic (TSS) or the Area Under Curve (AUC).
+
+The formula for TSS is:
+
+$$
+TSS = True Positive Rate + True Negative Rate - 1
+$$ 
+
+where: 
+
+$$
+True Positive Rate = True Positives / (True Positives + False Negatives)
+$$ 
+and:
+
+$$
+True Negative Rate = True Negatives / (True Negatives + False Positives)
+$$ 
+
+So, to calculate our TSS from our confusion matrix we can substitute
+in our values from our confusion matrix, we first calculate our True
+Positive Rate:
+
+$$
+True Positive Rate = `r cm$tp` / (`r cm$tp` + `r cm$fn`) = `r round(cm$tp/(cm$tp + cm$fn), 2)`
+$$ 
+
+Followed by our True Negative Rate:
+
+$$
+True Negative Rate = `r cm$tn` / (`r cm$tn` + `r cm$fp`) = `r round(cm$tn/(cm$tn + cm$fp), 2)`
+$$ 
+
+And then combine them together in our TSS formula:
+
+$$
+TSS = True Positive Rate + True Negative Rate - 1 = `r round(cm$tp/(cm$tp + cm$fn), 2)` + `r round(cm$tn/(cm$tn + cm$fp), 2)` - 1 = `r round(cm$tp/(cm$tp + cm$fn), 2) + round(cm$tn/(cm$tn + cm$fp), 2) - 1`
+$$
+
+AUC is slightly different. It is independent of the classification
+threshold value, because it is an aggregated value of testing the true
+positive rate versus false positive rate at several different threshold
+values (varying from 0, where all values are classified as positives, to
+1 where all values are classified as negatives). It is calculated as the
+integral of the area under the curve of the receiver operator curve
+(ROC), as shown below:
+
+```{r fig.cap='An example of a Receiver Operator Curve. AUC is the value of the Area Under Curve of the ROC.', out.width='100%', echo = F}
+knitr::include_graphics(here('images/ROC_curve.png'))
+```
+
+Here is the Receiver Operator Curve for our species:
+
+```{r, warning = F}
+# Receiver Operator Curve (ROC)
+plotROC(rf_model, test = test)
+```
+
+TSS and AUC typically vary from 0-1, and values closer to 1 are better
+performing models. TSS values \>0.8, 0.6-0.8 and 0.2-0.6 indicate a good
+to excellent, useful and poor model performance, respectively. AUC
+results were considered excellent for AUC values between 0.9-1, good for
+AUC values between 0.8-0.9, fair for AUC values between 0.7-0.8, poor
+for AUC values between 0.6-0.7 and failed for AUC values between
+0.5-0.6. This is how you calculate them using `SDMtune`:
+
+```{r}
+# True Skill Statistic
+tss(rf_model, test = test)
+
+# Area Under Curve
+auc(rf_model, test = test)
+```
+
+Rather than just using a majority-rule threshold, there are many different thresholds we could apply, that would depend on what we want from our model. For example, if we wanted a model that never misses a *True Positive*, we would set our threshold very low (e.g. 0.1). If we wanted a model that never includes a *False Positive* then we could set our threshold very high (e.g. 0.9). There are tools available to help us maximise our *True Positive Rate*, while minimising our *False Positive Rate*. This is always a trade-off, so it takes some careful detective work and personal decisions about what kind of output you want to decide on an adequate threshold. 
+
+In our case, let's select the value that maximises our *True Positive Rate*, while minimising our *False Positive Rate*.
+
+```{r}
+# Selecting a threshold
+ths <- thresholds(rf_model, test = test)
+ths %>% DT::datatable()
+```
+
+Let's select the value for maximum test sensitivity (True Positive Rate) plus specificity (False Positive Rate) in the 5th row and 2nd column, which is `r ths[5,2]`.
+
+```{r}
+th = ths[5,2]
+cm_custom <- confMatrix(rf_model, test = test, th = th)
+```
+
+We can now calculate our chosen True Positive Rate and False Positive Rate and add it to our ROC plot:
+
+```{r}
+# True Positive Rate (Sensitivity)
+TPR <- cm_custom$tp/(cm_custom$tp + cm_custom$fn)
+
+# False Positive Rate (1 - Specificity)
+FPR <- 1 - cm_custom$tn/(cm_custom$tn + cm_custom$fp)
+```
+
+```{r, warning=F}
+# Receiver Operator Curve (ROC) showing best threshold
+plotROC(rf_model, test = test) + 
+  geom_point(aes(x = FPR, y = TPR), col = 'red', size = 3) +
+  labs(x = 'False Positive Rate (1 - Specificity)', 
+       y = 'True Positive Rate (Sensitivity)')
+```
+
+
+Again, there is a whole world of possible metrics you could use. Read up
+more about the use of different metrics:
+
+-   [Konowalik & Nosol
+    2021](https://www.nature.com/articles/s41598-020-80062-1)
+-   [Metrics to evaluate your ML
+    algorithm](https://towardsdatascience.com/metrics-to-evaluate-your-machine-learning-algorithm-f10ba6e38234)
+-   [True Skill
+    Statistics](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5288248/pdf/ECE3-7-863.pdf)
+-   [AUC and Receiver Operature
+    Curve](https://towardsdatascience.com/roc-curve-and-auc-explained-8ff3438b3154)
+
+### 8. Variable insights & predicting habitat suitability
+
+```{r workflow 8, echo=FALSE, out.width='100%', fig.cap='Step 8.'}
+knitr::include_graphics(here::here('images/2_species_distribution_model_4.png'))
+```
+
+#### Variable importance
+
+To determine which environmental covariates had the greatest influence
+on the modeled distribution of our species, we can use calculate the
+variable importance. There are many ways to do this and different models
+have different approaches (e.g. jackknife with MaxEnt). This function
+randomly permutes one variable at a time and calculates the decrease in
+training AUC values. The results are normalised to percentages.
+
+```{r, out.width='100%'}
+vi <- varImp(rf_model, permut = 5)
+plotVarImp(vi[,1:2])
+```
+
+These results suggest that the **`r vi$Variable[1]`**
+(`r round(vi$Permutation_importance[1], 2)` %) and
+**`r vi$Variable[2]`** (`r round(vi$Permutation_importance[2], 2)` %)
+are the most important variables in our model. Remember to consider the
+colinearity relationships with the variables we excluded earlier.
+
+#### Response curves
+
+We can also plot out the non-linear response of our species to each
+environmental variable when all other variables are set to their mean
+values. This gives us an idea of the direction that a variable may
+influence the response of presence/absence of our species, while the
+variable importance let's us know about the magnitude. Let's take a look
+at our top 2 variables:
+
+```{r, out.width='100%'}
+SDMtune::plotResponse(rf_model, var = vi$Variable[1], marginal = TRUE, rug = TRUE)
+SDMtune::plotResponse(rf_model, var = vi$Variable[2], marginal = TRUE, rug = TRUE)
+```
+
+#### Predict habitat suitability
+
+Our final and perhaps most exciting step is to take a look at the
+prediction surface. This output gives us an idea of where the
+environment best correlates with the known locations (and randomised
+pseudo-absences) of our species. For this reason, we can call it a
+prediction of habitat suitability. For many biogeographical reasons, it
+is unlikely our species will occupy all of these spaces, but it gives us
+an idea of spaces where it potentially *could* be suitable for it to
+grow:
+
+```{r}
+pred <- predict(rf_model, data = wc_mad_sel)
+
+#### Export data
+terra::writeRaster(pred, here(paste0('output/species_distribution_model/',spp_code,'_prediction.tif')), overwrite = TRUE)
+```
+
+Convert the predicted `raster` to a `data.frame` so that we can easily
+visualise it in ggplot2 using `geom_tile()`
+
+```{r, out.width='100%'}
+pred_df <- as.data.frame(pred, xy = TRUE)
+
+ggplot() +
+  geom_tile(data = pred_df, aes(x = x, y = y, fill = lyr1)) +
+  scale_fill_gradientn(colours = c("#2c7bb6", "#abd9e9", "#ffffbf", "#fdae61", "#d7191c"), na.value = NA,
+                       name = 'Habitat\nsuitability') +
+  geom_sf(data = mad_sf, fill = NA) +
+  geom_point(data = all_pts_df %>% filter(pr_ab == 1), aes(x = x, y = y)) +
+  labs(x = 'Longitude', y = 'Latitude') +
+  theme_minimal()
+```
+
+#### Predict habitat suitability with threshold
+
+In certain circumstances, we may be more interested in predicting a
+binary outcome of sites where the species *is* or *is not* likely to
+occur. We can do this by setting the threshold that we tinkered with earlier of where where habitat is likely to be suitable. 
+
+```{r, class.source="bg-info", out.width='100%'}
+ths <- thresholds(rf_model, test = test)
+ths %>% DT::datatable()
+```
+
+Let's again select the threshold value that maximizes the sensitivity plus
+specificity:
+
+```{r}
+th = ths[5,2]
+# th = 0.5
+print(paste('The chosen threshold value is:', th))
+```
+
+We can now use this threshold value to alter our spatial prediction.
+Compute the thresholded value and then covert it from a `raster` to a
+`data.frame`.
+
+```{r, out.width='100%'}
+pred_th <- pred >= th
+pred_th_df <- as.data.frame(pred_th, xy = TRUE)
+plot(pred_th)
+```
+
+Create the final threshold plot:
+
+```{r, out.width='100%'}
+ggplot() +
+  geom_tile(data = pred_th_df, aes(x = x, y = y, fill = as.factor(lyr1))) +
+  scale_fill_manual(values = c("#2c7bb6", "#d7191c"), na.value = NA,
+                    name = paste0('Habitat\nsuitability\nbinary (>= ',th,')'),
+                    labels = c('absent','present','')) +
+  geom_sf(data = mad_sf, fill = NA) +
+  geom_point(data = all_pts_df %>% filter(pr_ab == 1), aes(x = x, y = y)) +
+  labs(x = 'Longitude', y = 'Latitude') +
+  theme_minimal()
+```
+
+### BONUS SECTION
+
+Once we have identified the core regions of habitat suitability for our species (i.e. our thresholded presence-absence map), we can then use the output for several downstream outputs. In this example, we will calculate the proportion of our species core habitat suitability that overlaps with current designated protected areas in Madagascar.
+
+The protected area data was downloaded from the [World Database on Protected Areas](https://www.protectedplanet.net/en/thematic-areas/wdpa?tab=WDPA) as a set of 3 shapefiles for Madagascar. These spatial files contain lots of useful information on the type, size and purpose of the protected area. 
+
+Let's first load this dataset in and filter it to only include terrestrial protected areas:
+
+```{r}
+#### Identify overlap with Protected Areas ----
+# load in protected area shapefiles. There are 3 files, so we want to load them all in together and then bind them into one file
+prot_areas <- list.files(here('data/vect/WDPA_Madagascar'), pattern = '*.shp', full.names = TRUE)
+prot_areas_list <- lapply(prot_areas, read_sf)
+# bind the 3 files togther
+prot_areas_all <- bind_rows(prot_areas_list) %>% filter(MARINE == 0)
+```
+
+As we're doing area calculations, it is really important that we now convert all of our spatial data files to an equal area projection. This means that distance and area will be calculate more accurately than if we were using a longitude/latitude system.
+
+```{r}
+#### convert to equal area projection
+# convert the protected areas
+prot_areas_all %>% 
+  st_transform(crs = 'EPSG:29702') -> prot_areas_all_proj
+
+# convert the presence/absence raster
+pred_th %>% 
+  project(.,vect(prot_areas_all_proj), method = 'near') -> pred_th_proj
+```
+
+Let's visualise the difference between the projections and see if you can tell the difference:
+
+```{r}
+par(mfrow=c(1,2))
+plot(pred_th)
+plot(vect(prot_areas_all), add = TRUE)
+plot(pred_th_proj)
+plot(vect(prot_areas_all_proj), add = TRUE)
+```
+
+We can now do some simple calculations. As we know the resolution of each grid cell, all we need to do is count how many grid cells there are that are presences (1's) and how many there are in total (0's + 1's) and then multiply this by the cell size to get a basic area estimate.
+
+```{r}
+# What is the area of species presences?
+# we select and sum only the cells with 1's, then multiply this by the size of the raster cells and lastly divide this by meters to get a result in km2.
+pres_area <- (sum(pred_th_proj[] == 1, na.rm = TRUE) * (res(pred_th_proj)[1]*res(pred_th_proj)[2]) / (1000^2))
+paste('The area of species presences is',pres_area, 'km2')
+
+# Calculate the area of all cells
+all_area <- (sum(!is.na(pred_th_proj[])) * (res(pred_th_proj)[1]*res(pred_th_proj)[2]) / (1000^2))
+paste('The area of all cells is',all_area, 'km2')
+
+# And lastly calculate the percentage of coverage of our species across all of Madagascar
+paste('The species presences cover',round(pres_area/all_area*100, 2), '% of Madagascar')
+```
+
+We now want to work out what % of our species is found within Protected Areas:
+
+```{r, message = FALSE, warning=FALSE}
+# create custom function to calculate the proportion of area covered by each Protected Area
+sum_cover <- function(x){
+  list(x %>%
+         group_by(value) %>%
+         summarize(total_area = sum(coverage_area)))
+}
+
+# extract the amount of area covered 
+extract_all <- exact_extract(pred_th_proj, prot_areas_all_proj, coverage_area = TRUE, summarize_df = TRUE, fun = sum_cover, progress = FALSE)
+# add the names of the protected areas back on to our extraction
+names(extract_all) <- prot_areas_all_proj$ORIG_NAME
+
+# convert the list to a data frame
+extract_df <- bind_rows(extract_all, .id = 'ORIG_NAME')
+# take a look at the first 6 rows
+head(extract_df)
+```
+
+We can now sum all of the area that overlaps with the protected areas for presences (i.e. 1's) and divide this by the total area of all presences:
+
+```{r}
+# we can now sum all of the area that overlaps with the protected areas for presences (i.e. 1's) and divide this by the total area of all presences
+area_under_pas <- extract_df %>% 
+  filter(value == 1) %>% 
+  summarise(sum(total_area)/(1000^2))
+
+paste(round(area_under_pas/pres_area * 100, 2),'% of the predicted presences are found within protected areas')
+```
+
+Our final step is to join our IUCN protected area categories onto our presence area data.frame. This will provide us with some information on what percentage of our species area is conserved under different categories. This provides important context on both the quality and quantity of protected areas overlapping with our species range:
+
+```{r}
+iucn_cat <- prot_areas_all_proj %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(ORIG_NAME, IUCN_CAT)
+
+extract_df %>% 
+  left_join(iucn_cat, by = 'ORIG_NAME', relationship = 'many-to-many') %>% 
+  filter(value == 1) %>%
+  group_by(IUCN_CAT) %>%
+  summarise(area = sum(total_area)/(1000^2)) %>%
+  mutate(perc = round(area/sum(area) * 100, 2))
+```
+
+
+------------------------------------------------------------------------
+
+END

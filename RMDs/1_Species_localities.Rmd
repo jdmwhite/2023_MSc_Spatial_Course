@@ -1,0 +1,326 @@
+---
+title: "Processing locality data"
+author: 
+  name: Joseph White^[j.white2@kew.org], Tarciso Leao^[t.leao@kew.org], Felix Lim^[F.Lim@kew.org], Carolina Tovar^[c.tovar@kew.org]
+  affiliation: Spatial Analysis Team, Ecosystem Stewardship, RGB Kew
+date: "2023-11-27"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    # theme: yeti
+    # highlight: haddock
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = here::here("html")) })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+```{r klippy, echo=FALSE, include=TRUE}
+# install.packages('remotes')
+# remotes::install_github("rlesur/klippy")
+klippy::klippy(position = c('top','right'))
+```
+
+The end goal of this practical session is to produce a dataset of cleaned species presence records and generated pseudo-absence records. Along the way, you will learn some of the important steps used to clean, filter and generate species records.
+
+### Learning objectives
+
+1.  Download locality data
+2.  Clean the coordinate data
+3.  Apply spatial thinning
+4.  Create pseudo-absences
+
+IMPORTANT NOTES:
+
+-   [Code chunks shown in GREEN]{style="color: green;"}: you must change this to your species of choice. Find your species on QM+.
+-   [Code chunks shown in BLUE]{style="color: blue;"}: these are bits of code that require some important choices. You need to use your discretion and best practices here to find the best solution for your species. So change the values around and see how it changes the outputs. Add this to your end discussion.
+
+```{r workflow, echo=FALSE, out.width='100%', fig.cap='Figure 1. The expected workflow and end product of session 1.'}
+knitr::include_graphics(here::here('images/1_species_localities.png'))
+```
+
+#### Install and load packages
+
+```{r packages, message = FALSE, warning = FALSE}
+library(rgbif)
+library(DT)
+library(tidyverse)
+library(CoordinateCleaner)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(mapview)
+library(terra)
+library(flexsdm)
+library(here)
+```
+
+### 1. Download locality data from GBIF
+
+```{r workflow 1, echo=FALSE, out.width='100%', fig.cap='Step 1.'}
+knitr::include_graphics(here::here('images/1_species_localities_1.png'))
+```
+
+We will download the data from the Global Biodiversity Information Facility ([GBIF](https://www.gbif.org/)). This is a massive online database of museum, herbarium, large database and in person observations. It has recently been integrated with [iNaturalist](https://www.inaturalist.org/) (a citizen science based observation platform), meaning it has both historical and contemporary observations.
+
+We will be working on a range of different species from Madagascar. Madagascar has an astonishing portion of endemic species, with \~80% of the approximately 12 000 plant species restricted to the island. For this example, we will use the the species with the most available GBIF records *Dracaena reflexa*.
+
+```{r, out.width='100%', fig.cap='Figure 2. Dracaena reflexa growing wild in Madagascar. Photograph taken by @kenbehrens (CC-BY-NC) (https://www.inaturalist.org/observations/64847803)', echo=FALSE}
+knitr::include_graphics(here('images/Dracaena_reflexa_Madagascar_CC-BY-NC.jpg'))
+```
+
+To do this, we use the function `occ_data()`, specifying the species name, that we want records with coordinates only and those that are in Madagascar. The next step is to only extract the `data`. Lastly, we use the interactive `datatable()` tool (with a few custom options) to play around with the large resulting table.
+
+```{r choose species, class.source="bg-success"}
+# Name your species
+spp <- c("Dracaena reflexa")
+```
+
+```{r Download locality data from GBIF, out.width='100%', warning = F}
+# download GBIF occurrence data for this species; this takes time if there are many data points!
+gbif_download <- occ_data(scientificName = spp, hasCoordinate = TRUE, country = 'MG')
+
+# select only the data (ignore the other metadata for now)
+gbif_data <- gbif_download$data
+
+# visualise
+gbif_data %>% DT::datatable(extensions = 'Scroller',
+  options = list(scrollX = TRUE,
+                 scrollY = 200,
+                 scroller = TRUE))
+```
+
+```{r interactive map1, out.width='100%'}
+# interactive map
+gbif_data %>% 
+  st_as_sf(coords = c('decimalLongitude', 'decimalLatitude'), crs = 4326) %>% 
+  dplyr::select(year) %>% 
+  mapview(layer.name = spp)
+```
+
+### 2. Clean GBIF data
+
+```{r workflow 2, echo=FALSE, out.width='100%', fig.cap='Step 2.'}
+knitr::include_graphics(here::here('images/1_species_localities_2.png'))
+```
+
+The GBIF data includes many historical observations, which were taken before the use of GPS. Because of this, the locations provided may have errors, lack precision or may not be at the required spatial scale for downstream analysis. Please read [this text](https://assets.ctfassets.net/uo17ejk9rkwj/46SfGRfOesU0IagMMAOIkk/1c03ea3e21fcd9025cc800d786890e72/Principles_20and_20Methods_20of_20Data_20Cleaning_20-_20ENGLISH.pdf) for more information on why we need to clean GBIF location data.
+
+We will use some custom filters together with the `CoordinateCleaner` package to use some useful functions that allow for easy cleaning of the locality data. Each function gives an output telling us how many observations were dropped.
+
+First, we filter out localities placed directly on the equator and prime meridian line (i.e. 0, 0). We then remove all duplicate entries, by only keeping `distinct()` values for longitude and latitude.
+
+We are starting with `r nrow(gbif_data)` records.
+
+```{r Clean GBIF data filt, class.source="bg-info"}
+gbif_data %>%
+  filter(!decimalLatitude == 0 | !decimalLongitude == 0) %>%
+    distinct(decimalLongitude,decimalLatitude,speciesKey,datasetKey, .keep_all = TRUE) -> gbif_filt
+```
+
+After our custom filter, we are left with `r nrow(gbif_filt)` records. We will now use the `CoordinateCleaner` helper function, all of which begine with `cc_`. We sequentially remove records that fall within 2 km of country centroids, capital city centroids, the locations of major zoos or herbaria, and lastly we remove any record that falls within the ocean:
+
+```{r clean gbif data cc, warning = F}
+gbif_filt %>%
+  cc_cen(lat = 'decimalLatitude', lon = 'decimalLongitude', buffer = 2000) %>% # remove country centroids within 2km 
+  cc_cap(lat = 'decimalLatitude', lon = 'decimalLongitude', buffer = 2000) %>% # remove capitals centroids within 2km
+  cc_inst(lat = 'decimalLatitude', lon = 'decimalLongitude', buffer = 2000) %>% # remove zoo and herbaria within 2km 
+  cc_sea(lat = 'decimalLatitude', lon = 'decimalLongitude') -> spp_clean # remove from ocean
+```
+
+All together, we have now removed another `r nrow(gbif_filt) - nrow(spp_clean)` records, leaving us with `r nrow(spp_clean)` records. We aren't done filtering the records just yet, but let's visualise what has been removed so far.
+
+#### Downloading country borders
+
+To plot our locality records on a map of Madagascar, we will need to download the country boundary as a spatial file. We will use the `rnaturalearth` package and `ne_countries()` function to download country boundaries. `ggplot2` is a flexible plotting library and has a built in `geom_*` for vectors in the `sf` format, called `geom_sf()`, which we will use to plot our Madagascar boundary. On top of these, add the locality records as points, using `geom_point()`.
+
+```{r Download map layers, fig.align="center"}
+# using the rnaturalearth package, download the country border and return it as an sf object
+mad <- ne_countries(country = 'Madagascar', scale = 'medium', returnclass = 'sf')
+
+# We can easily plot the spatial layers using ggplot
+ggplot() +
+  geom_sf(data = mad) +
+  geom_point(data = gbif_data, aes(x = decimalLongitude, y = decimalLatitude), col = 'red', size = 3) +
+  geom_point(data = spp_clean, aes(x = decimalLongitude, y = decimalLatitude), col = 'blue', size = 3) +
+  labs(title = 'Raw vs. cleaned GBIF data') +
+  theme_void()
+```
+
+Alternatively, and to add consistency to our map, we can convert the `spp_clean` dataframe to a `simple feature`-styled vector (i.e. an `sf` object). First clean up the GBIF dataset a bit further, by selecting relevant columns and changing the name of the longitude and latitude columns. We can now add the locality records to the map using `geom_sf()` in place of `geom_point()`.
+
+```{r plot location points 1, error = TRUE, fig.show = 'hide', out.width='100%'}
+# Clean the dataset by selecting only the columns we need, rename the lon/lat variables
+spp_clean %>% 
+  dplyr::select(key, year, basisOfRecord, locality, coordinateUncertaintyInMeters, occurrenceRemarks, recordedBy, lon = decimalLongitude, lat = decimalLatitude) -> spp_sel
+
+# Now we want to convert & project our data to the correct Coordinate Reference System
+spp_sf <- st_as_sf(spp_sel, coords = c('lon', 'lat'))
+st_crs(spp_sf) # as we converted these directly from GPS points, there is no set CRS
+
+# Let's try plot this
+ggplot() +
+  geom_sf(data = mad) +
+  geom_sf(data = spp_sf)
+```
+
+When we try to plot this we get an error... This is because we have simply used the longitude and latitude coordinates without provided a coordinate reference system (CRS). Let's provide a standard CRS (EPSG: 4326) and try again.
+
+(Note: when using `geom_sf()`, we don't need to specify the x and y aesthetics in `aes(x = ..., y = ...)`, as this information is stored in a new column called `geometry`, which `geom_sf()` reads directly.)
+
+```{r provide crs, fig.align='center', out.width='100%'}
+st_crs(spp_sf) = 4326
+
+# Let's try plot this again
+ggplot() +
+  geom_sf(data = mad) +
+  geom_sf(data = spp_sf, size = 3, alpha = 0.5) +
+  labs(title = 'Plotting as simple features (sf)') +
+  theme_void()
+```
+
+We can see that there are still many overlapping records, which will represent redundant information to any models we later use. To explore this further, let's add the points to an interactive map,
+
+#### Interactive maps
+
+We can make a simple interactive map to explore this. We can use the `mapview` package to make interactive maps. We add in the `st_jitter()` function, to slightly move points that are directly overlapping. This allows us to see all of the points.
+
+```{r leaflet interactive map, fig.align="center", out.width='100%'}
+spp_sf %>% 
+  st_jitter(factor = 0.0001) %>% 
+  mapview()
+```
+
+As mentioned earlier, there is a lot of redundancy in the locality records, which could influence the distribution models we will use later. There are several methods available to remove these overlapping points. This is typically called spatial thinning.
+
+### 3. Spatial thinning
+
+```{r workflow 3, echo=FALSE, out.width='100%', fig.cap='Step 3.'}
+knitr::include_graphics(here::here('images/1_species_localities_3.png'))
+```
+
+First, we will need to load in the environmental variables that we'll use to look for correlations between where the species occurs and what the most suitable environmental drivers may be. We are using the WorldClim data as our environmental covariates. This can be downloaded using the `raster` package or loaded in directly from file. Read up on the WorldClim dataset [here](https://worldclim.org/data/index.html) and [here](https://doi.org/10.1002/joc.5086).
+
+#### Load in environmental variables
+
+We now shift our attention to the `terra` package, which is used primarily for handling raster data (though is also very useful for vector data). Load in the worldclim data using `terra::rast()`. The worldclim data is given a generic naming structure (bio1, bio2, etc.), so let's rename each variable to a shortened, but more sensible name. Lastly, plot out the mean annual temperature layer.
+
+```{r load wc, fig.align='center', out.width='100%'}
+worldclim <- rast(here("data/rast/afr_worldclim.tif"))
+names(worldclim)
+names(worldclim) <- c("mean_ann_t","mean_diurnal_t_range","isothermality", "t_seas", 'max_t_warm_m','min_t_cold_m',"t_ann_range",'mean_t_wet_q','mean_t_dry_q','mean_t_warm_q','mean_t_cold_q','ann_p', 'p_wet_m','p_dry_m','p_seas','p_wet_q','p_dry_q','p_warm_q','p_cold_q')
+plot(worldclim$mean_ann_t)
+```
+
+This represents the mean annual temperature between 1970-2000 for the terrestrial world. Do you notice anything strange about the temperature scale? We will handle this in the next practical session. Let's crop and mask the worldclim dataset to our focus region, Madagascar. Then plot the first 16 (of 19) variables.
+
+```{r plot wc_mad, out.width='100%'}
+# Ensure that the worldclim data and Madagascar boundary are in the same project
+mad <- st_transform(mad, 'EPSG:4326')
+
+wc_mad <- worldclim %>% 
+  crop(., vect(mad)) %>% 
+  mask(., vect(mad))
+plot(wc_mad)
+```
+
+To spatially thin our locality records, we will set a distance threshold to only keep 1 record within 10 km of it's neighbouring records. To do this, we need use the locality records in the `data.frame()` format (we will just reuse `spp_sel`) and we need to rename our lon/lat columns to x/y. We select the method *defined* and set a distance threshold of 10 km. Lastly, we supply the projection based on the environmental variables.
+
+To visualise the points that have been removed, we join the the `spp_sel` data.frame on to the new `spp_filt` data.frame and then filter the `spp_sel` data.frame by the unique `key` for each record.
+
+#### Thin records by distance
+
+```{r spatial thinning, class.source="bg-info"}
+# Filter by geography
+set.seed(42)
+spp_filt <- occfilt_geo(
+  data = spp_sel %>% rename(x = lon, y = lat),
+  x = 'x',
+  y = 'y',
+  method = c('defined', d = 10), # set a 10 km threshold
+  env_layer = wc_mad,
+  prj = crs(wc_mad)
+)
+```
+
+```{r identify thinned localities}
+# join the result of the filter back onto the metadata and convert to sf
+spp_filt_sf <- spp_filt %>% 
+  st_as_sf(coords = c('x','y'), crs = st_crs(4326))
+
+# identify the localities that were removed
+spp_removed_sf <- spp_sel %>% 
+  filter(!key %in% spp_filt$key) %>% 
+  st_as_sf(coords = c('lon','lat'), crs = st_crs(4326))
+```
+
+We can now add these to an interactive map to view the records removed with spatial thinning:
+
+```{r plot thinned records, out.width='100%'}
+mapview(spp_filt_sf, zcol = NULL, col.regions = 'blue', layer.name = 'localities included') +
+  mapview(spp_removed_sf, zcol = NULL, col.regions = 'red', layer.name = 'localities filtered')
+```
+
+### 4. Create pseudo-absences
+
+```{r workflow 4, echo=FALSE, out.width='100%', fig.cap='Step 4.'}
+knitr::include_graphics(here::here('images/1_species_localities_4.png'))
+```
+
+Our final important step is to create a new dataset of localities where our target species is **unlikely** to be found. Most species locality data is in the format of confirmed *presences*, however most models require both *presences* and *absences* to produce robust findings. Seeing as we only have presences in our dataset, we want to now produce a set of absence records for where we think the species does not occur. These are called *pseudoabsences*. As you can imagine, this step can potentially bring in a large amount of unintended biases to the way a model interprets where a species' most suitable habitat may occur. There are many methods to protect against this. If you are interested to find out more, read [this](https://doi.org/10.1111/j.2041-210X.2011.00172.x) paper.
+
+We are going to create random absence points only in spaces **outside** of a 10 km buffer of our presence points. To do this, we use the method *geo_const* and supply a width value in meters (10000 m = 10 km). We chose the number of points we would like to generate by using the same number of presence points we have i.e. `nrow(spp_filt)` = `r nrow(spp_filt)`. Again, we need to provide our environmental variables in `terra::rast()` format and lastly we provide the calibration area. This sets the spatial limits on where the points will be generated. In this case, we need to convert the Madagascar country boundary (`mad`) from an `sf` format, to a `terra` format, using the function `vect()`.
+
+We then use `glimpse(pa)` to take a look at what we have created:
+
+```{r pseudo-absences, class.source="bg-info"}
+set.seed(42)
+pseudo_abs <-  sample_pseudoabs(
+  data = spp_filt,
+  x = 'x',
+  y = 'y',
+  n = nrow(spp_filt),
+  method = c('geo_const', width = 10000), # 10 km buffer again.
+  rlayer = wc_mad,
+  calibarea = vect(mad)
+)
+
+head(pseudo_abs)
+```
+
+We can now filter our presence records down to the same type of `data.frame()` by selecting only the x/y columns and then adding on a column called `pr_ab`, which means presence-absences. In this case 0 = absence, while 1 = presence.
+
+```{r prepare presences}
+pres <- spp_filt %>% 
+  dplyr::select(x, y) %>% 
+  mutate(pr_ab = 1)
+
+head(pres)
+```
+
+We can now bind these two datasets together to all of our points in one `data.frame()`. Convert this to a `sf` object to visualise interactively:
+
+```{r combine pts, out.width='100%'}
+all_pts <- rbind(pres, pseudo_abs)
+all_pts_sf <- all_pts %>% 
+  mutate(pr_ab = as.factor(pr_ab)) %>% 
+  st_as_sf(coords = c('x','y'), crs = st_crs(4326))
+
+mapview(all_pts_sf, zcol = 'pr_ab', layer.name = 'all points')
+```
+
+#### Export locality data
+
+Our last trick is to save this complete set of presences and pseudo-absences to file, so that we can use it in our next practical session, where we will run our models. Export it as a `sf` object in the ESRI ShapeFile format. This will produce 4 files, which each contain important bits of metadata:
+
+```{r export pts}
+write_sf(all_pts_sf, here(paste0('output/species_localities/',gbif_data$genus[1],'_',gbif_data$specificEpithet[1],'_','all_points.shp')))
+```
+
+------------------------------------------------------------------------
+
+END
